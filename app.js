@@ -43,7 +43,7 @@ const DB = (() => {
 const DEFAULTS = {
   prefix: 'INV-', pad: 4, startNo: 1,
   dQty: 2, dRate: 2, dAmt: 2,
-  gstApplicable: true, gstRate: 18,
+  gstApplicable: true, gstRate: 18, invStyle: 'classic',
   payTerms: '', terms: '',
   units: ['PCS', 'KG', 'QUINTAL', 'TON', 'METER', 'LITRE', 'BOX', 'NOS', 'DOZEN']
 
@@ -150,38 +150,74 @@ async function nextAutoNumber(c, exceptId) {
 /* =========================================================
    PDF (jsPDF + autoTable) – A4, multi-page
    ========================================================= */
+const STYLES = {
+  classic: { name: 'Classic', desc: 'Blue headings with a full grid. Clean, standard A4 bill.', font: 'helvetica', ink: [29, 53, 87], tint: [238, 241, 246], line: [130, 140, 155], head: 'fill', theme: 'grid' },
+  tally: { name: 'Tally Style', desc: 'Black and white, boxed page, centred company name, like Tally prints.', font: 'helvetica', ink: [0, 0, 0], tint: [255, 255, 255], line: [0, 0, 0], head: 'plain', theme: 'tally', center: true, border: 'single', declaration: true },
+  modern: { name: 'Modern', desc: 'Coloured header band with soft striped rows.', font: 'helvetica', ink: [15, 98, 92], tint: [232, 244, 242], line: [200, 215, 213], head: 'fill', theme: 'striped', band: true },
+  minimal: { name: 'Minimal', desc: 'Light lines, lots of white space, grey text.', font: 'helvetica', ink: [70, 70, 70], tint: [244, 244, 244], line: [200, 200, 200], head: 'plain', theme: 'light', titleRight: true },
+  traditional: { name: 'Traditional', desc: 'Serif font, double border, centred header. Old bill-book look.', font: 'times', ink: [96, 24, 24], tint: [250, 242, 236], line: [96, 24, 24], head: 'fill', theme: 'grid', center: true, border: 'double', declaration: true }
+};
 function buildPdf(inv) {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ unit: 'mm', format: 'a4', compress: true });
+  const cfg = STYLES[inv.style] || STYLES.classic;
   const t = calcInvoice(inv), c = inv.company || {}, W = 210, M = 10;
-  const INK = [29, 53, 87], TINT = [238, 241, 246], LINE = [130, 140, 155];
-  const gstOn = !!inv.gstApplicable;
-  let y = M, tx = M, logoBottom = M;
-  if (c.logo) {
-    try {
-      const p = doc.getImageProperties(c.logo);
-      let w = p.width, h = p.height; const r = Math.min(32 / w, 22 / h); w *= r; h *= r;
-      doc.addImage(c.logo, p.fileType, M, y, w, h); tx = M + w + 5; logoBottom = y + h;
-    } catch (e) { /* ignore bad logo */ }
-  }
-  doc.setFont('helvetica', 'bold').setFontSize(15).setTextColor(20);
-  const nameLines = doc.splitTextToSize(c.name || '', W - M - tx);
-  doc.text(nameLines, tx, y + 5.5);
-  let ty = y + 5.5 + nameLines.length * 6;
-  doc.setFont('helvetica', 'normal').setFontSize(9).setTextColor(50);
+  const INK = cfg.ink, TINT = cfg.tint, LINE = cfg.line, F = cfg.font;
+  const gstOn = !!inv.gstApplicable, fill = cfg.head === 'fill';
+  const bw = cfg.theme === 'tally' ? 0.3 : cfg.theme === 'light' ? 0.1 : 0.2;
+  const base = { font: F, fontSize: 8.8, cellPadding: 2, lineColor: LINE, lineWidth: cfg.theme === 'striped' ? 0 : bw, textColor: 20, overflow: 'linebreak' };
+  const headSt = fill ? { fillColor: INK, textColor: 255, fontStyle: 'bold' } : { fillColor: [255, 255, 255], textColor: 20, fontStyle: 'bold' };
+  const infoHead = fill ? { fillColor: TINT, textColor: 20, fontStyle: 'bold' } : headSt;
+  const lbl = s => ({ content: s, styles: { fontStyle: 'bold', fillColor: fill ? TINT : [255, 255, 255] } });
+
+  // ---- header ----
+  let logo = null;
+  if (c.logo) { try { const p = doc.getImageProperties(c.logo); let w = p.width, h = p.height; const r = Math.min(32 / w, 22 / h); logo = { d: c.logo, t: p.fileType, w: w * r, h: h * r }; } catch (e) { /* ignore */ } }
+  const lw = logo ? logo.w + 5 : 0;
+  const textX = cfg.center ? W / 2 : M + lw;
+  const textW = cfg.center ? W - 2 * (M + lw) : W - M - (M + lw) - (cfg.titleRight ? 55 : 0);
+  const align = cfg.center ? 'center' : 'left';
+  doc.setFont(F, 'bold').setFontSize(15);
+  const nameLines = doc.splitTextToSize(c.name || '', textW);
+  doc.setFont(F, 'normal').setFontSize(9);
   const info = [];
   if (c.address) info.push(c.address);
   const st = compState(c); if (st) info.push('State: ' + st);
   const ids = [c.gstin && 'GSTIN: ' + c.gstin, c.pan && 'PAN: ' + c.pan].filter(Boolean).join('    '); if (ids) info.push(ids);
   const ct = [c.mobile && 'Mobile: ' + c.mobile, c.email && 'Email: ' + c.email].filter(Boolean).join('    '); if (ct) info.push(ct);
-  info.forEach(l => { const ls = doc.splitTextToSize(l, W - M - tx); doc.text(ls, tx, ty); ty += ls.length * 4.1; });
-  y = Math.max(ty, logoBottom) + 1.5;
-  doc.setDrawColor(...INK).setLineWidth(0.5).line(M, y, W - M, y);
-  y += 6.5;
-  doc.setFont('helvetica', 'bold').setFontSize(12).setTextColor(...INK);
-  doc.text(gstOn && c.gstin ? 'TAX INVOICE' : 'INVOICE', W / 2, y, { align: 'center' });
-  y += 3;
+  const infoLines = info.flatMap(l => doc.splitTextToSize(l, textW));
+  const top = cfg.band ? 8 : M;
+  const textH = nameLines.length * 6 + infoLines.length * 4.1;
+  let y;
+  if (cfg.band) {
+    y = top + Math.max(textH, logo ? logo.h : 0) + 6;
+    doc.setFillColor(...INK).rect(0, 0, W, y, 'F');
+  }
+  if (logo) {
+    if (cfg.band) doc.setFillColor(255, 255, 255).roundedRect(M - 1, top - 1, logo.w + 2, logo.h + 2, 1, 1, 'F');
+    try { doc.addImage(logo.d, logo.t, M, top, logo.w, logo.h); } catch (e) { /* ignore */ }
+  }
+  doc.setFont(F, 'bold').setFontSize(15).setTextColor(...(cfg.band ? [255, 255, 255] : [20, 20, 20]));
+  let ty = top + 5.5;
+  nameLines.forEach(l => { doc.text(l, textX, ty, { align }); ty += 6; });
+  doc.setFont(F, 'normal').setFontSize(9).setTextColor(...(cfg.band ? [230, 244, 242] : [50, 50, 50]));
+  infoLines.forEach(l => { doc.text(l, textX, ty, { align }); ty += 4.1; });
+  if (!cfg.band) {
+    y = Math.max(ty, top + (logo ? logo.h : 0)) + 1.5;
+    doc.setDrawColor(...(cfg.titleRight ? [190, 190, 190] : INK)).setLineWidth(cfg.theme === 'tally' ? 0.3 : cfg.titleRight ? 0.2 : 0.5).line(M, y, W - M, y);
+  }
+  const title = gstOn && c.gstin ? 'TAX INVOICE' : 'INVOICE';
+  if (cfg.titleRight) {
+    doc.setFont(F, 'bold').setFontSize(17).setTextColor(150, 150, 150); doc.text(title, W - M, top + 7, { align: 'right' }); y += 3;
+  } else {
+    y += 6.5;
+    doc.setFont(F, 'bold').setFontSize(12).setTextColor(...(cfg.band || fill ? INK : [0, 0, 0]));
+    if (cfg.border === 'double') doc.setDrawColor(...INK).setLineWidth(0.4).rect(W / 2 - 28, y - 5.8, 56, 8.2);
+    doc.text(cfg.theme === 'tally' ? 'Tax Invoice' : title, W / 2, y, { align: 'center' });
+    y += 3;
+  }
 
+  // ---- bill to / ship to / details ----
   const partyText = p => [p.name, p.address, p.state && 'State: ' + p.state, p.gstin && 'GSTIN: ' + p.gstin, p.pan && 'PAN: ' + p.pan].filter(Boolean).join('\n');
   const meta = [['Invoice No.', inv.number], ['Date', dmy(inv.date)], ['Vehicle No.', inv.vehicle], ['Agent / Broker', inv.agent], ['Delivery Location', inv.delivery]]
     .filter(r => r[1]).map(r => r[0] + ': ' + r[1]).join('\n');
@@ -191,12 +227,11 @@ function buildPdf(inv) {
   const cw = inv.shipOn ? [63, 63, 64] : [95, 95];
   doc.autoTable({
     startY: y, margin: { left: M, right: M }, theme: 'grid', head: [head], body: [body],
-    styles: { fontSize: 8.8, cellPadding: 2, lineColor: LINE, lineWidth: 0.2, textColor: 20, overflow: 'linebreak' },
-    headStyles: { fillColor: TINT, textColor: 20, fontStyle: 'bold' },
-    columnStyles: Object.fromEntries(cw.map((w, i) => [i, { cellWidth: w }]))
+    styles: base, headStyles: infoHead, columnStyles: Object.fromEntries(cw.map((w, i) => [i, { cellWidth: w }]))
   });
   y = doc.lastAutoTable.finalY;
 
+  // ---- items ----
   const showHsn = inv.items.some(i => (i.hsn || '').trim());
   const cols = [['S.No.', 'sn'], ['Description of Goods', 'd']];
   if (showHsn) cols.push(['HSN', 'h']);
@@ -207,23 +242,19 @@ function buildPdf(inv) {
     const x = t.items[i], o = { sn: i + 1, d: it.desc, h: it.hsn || '', q: fmt(x.q, it.qd ?? S.dQty), u: it.unit || '', r: fmt(x.r, it.rd ?? S.dRate), g: x.gst + '%', a: fmt(x.amount, it.ad ?? S.dAmt) };
     return cols.map(cc => o[cc[1]]);
   });
-  const right = { q: 1, r: 1, g: 1, a: 1 };
+  const right = { q: 1, r: 1, g: 1, a: 1 }, wd = { sn: 12, h: 22, q: 24, u: 18, r: 24, g: 16, a: 28 };
   const cs = {};
-  cols.forEach((cc, i) => {
-    const k = cc[1];
-    cs[i] = { halign: right[k] ? 'right' : k === 'sn' || k === 'u' ? 'center' : 'left' };
-    if (k === 'sn') cs[i].cellWidth = 12; if (k === 'h') cs[i].cellWidth = 22; if (k === 'q') cs[i].cellWidth = 24; if (k === 'u') cs[i].cellWidth = 18;
-    if (k === 'r') cs[i].cellWidth = 24; if (k === 'g') cs[i].cellWidth = 16; if (k === 'a') cs[i].cellWidth = 28;
-  });
+  cols.forEach((cc, i) => { const k = cc[1]; cs[i] = { halign: right[k] ? 'right' : k === 'sn' || k === 'u' ? 'center' : 'left' }; if (wd[k]) cs[i].cellWidth = wd[k]; });
   doc.autoTable({
     startY: y, margin: { left: M, right: M, bottom: 16 }, theme: 'grid', head: [cols.map(cc => cc[0])], body: rows, showHead: 'everyPage',
-    styles: { fontSize: 9, cellPadding: 2, lineColor: LINE, lineWidth: 0.2, textColor: 20, overflow: 'linebreak' },
-    headStyles: { fillColor: INK, textColor: 255, fontStyle: 'bold', halign: 'center' },
-    columnStyles: cs, rowPageBreak: 'avoid'
+    styles: { ...base, fontSize: 9 }, headStyles: { ...headSt, halign: 'center' },
+    alternateRowStyles: cfg.theme === 'striped' ? { fillColor: TINT } : {},
+    columnStyles: cs, rowPageBreak: 'avoid',
+    didParseCell: d => { if (cfg.theme === 'tally' && d.section === 'body') d.cell.styles.lineWidth = { top: 0, bottom: 0, left: 0.3, right: 0.3 }; }
   });
   y = doc.lastAutoTable.finalY;
 
-  // totals (right) + words & bank (left), kept on one page
+  // ---- totals ----
   const trows = [['Subtotal', fmt(t.subtotal)]];
   if (t.discount > 0) trows.push(['Discount', '- ' + fmt(t.discount)]);
   if (gstOn || t.discount > 0) trows.push(['Total Taxable Value', fmt(t.taxable)]);
@@ -235,20 +266,19 @@ function buildPdf(inv) {
   const bank = inv.company?.bank || {};
   const bankLines = [bank.name && 'Bank: ' + bank.name, bank.holder && 'A/c Holder: ' + bank.holder, bank.acc && 'A/c No.: ' + bank.acc, bank.ifsc && 'IFSC: ' + bank.ifsc, bank.branch && 'Branch: ' + bank.branch].filter(Boolean);
   if (y + 62 > 281) { doc.addPage(); y = M; }
-  const lbl = s => ({ content: s, styles: { fontStyle: 'bold', fillColor: TINT } });
   const left = [[lbl('Amount in Words')], [rupeesInWords(t.grand)]];
   if (bankLines.length) { left.push([lbl('Bank Details')]); left.push([bankLines.join('\n')]); }
   const startY = y;
-  doc.autoTable({
-    startY, margin: { left: M, right: W - M - 100, bottom: 16 }, theme: 'grid', body: left,
-    styles: { fontSize: 8.8, cellPadding: 2, lineColor: LINE, lineWidth: 0.2, textColor: 20 }
-  });
+  doc.autoTable({ startY, margin: { left: M, right: W - M - 100, bottom: 16 }, theme: 'grid', body: left, styles: base });
   const leftEnd = doc.lastAutoTable.finalY;
   doc.autoTable({
     startY, margin: { left: M + 100, right: M, bottom: 16 }, theme: 'grid', body: trows,
-    styles: { fontSize: 9.2, cellPadding: 2, lineColor: LINE, lineWidth: 0.2, textColor: 20 },
-    columnStyles: { 0: { cellWidth: 48 }, 1: { halign: 'right', cellWidth: 42 } },
-    didParseCell: d => { if (d.row.index === trows.length - 1) { d.cell.styles.fillColor = INK; d.cell.styles.textColor = 255; d.cell.styles.fontStyle = 'bold'; d.cell.styles.fontSize = 10.5; } }
+    styles: { ...base, fontSize: 9.2 }, columnStyles: { 0: { cellWidth: 48 }, 1: { halign: 'right', cellWidth: 42 } },
+    didParseCell: d => {
+      if (d.row.index !== trows.length - 1) return;
+      d.cell.styles.fontStyle = 'bold'; d.cell.styles.fontSize = 10.5;
+      if (fill) { d.cell.styles.fillColor = INK; d.cell.styles.textColor = 255; } else d.cell.styles.fillColor = [238, 238, 238];
+    }
   });
   y = Math.max(leftEnd, doc.lastAutoTable.finalY);
 
@@ -256,23 +286,28 @@ function buildPdf(inv) {
   if ((inv.payTerms || '').trim()) tc.push([lbl('Payment Terms')], [inv.payTerms.trim()]);
   if ((inv.terms || '').trim()) tc.push([lbl('Other Terms & Conditions')], [inv.terms.trim()]);
   if (tc.length) {
-    doc.autoTable({
-      startY: y, margin: { left: M, right: M, bottom: 16 }, theme: 'grid', body: tc,
-      styles: { fontSize: 8.6, cellPadding: 2, lineColor: LINE, lineWidth: 0.2, textColor: 20 }
-    });
+    doc.autoTable({ startY: y, margin: { left: M, right: M, bottom: 16 }, theme: 'grid', body: tc, styles: { ...base, fontSize: 8.6 } });
     y = doc.lastAutoTable.finalY;
   }
-  if (y + 34 > 285) { doc.addPage(); y = M; }
+  if (y + 34 > 281) { doc.addPage(); y = M; }
   y += 8;
-  doc.setFont('helvetica', 'bold').setFontSize(9.5).setTextColor(20);
+  if (cfg.declaration) {
+    doc.setFont(F, 'italic').setFontSize(8).setTextColor(70);
+    doc.text(doc.splitTextToSize('Declaration: We declare that this invoice shows the actual price of the goods described and that all particulars are true and correct.', 105), M, y);
+    doc.setFont(F, 'normal').text('E. & O.E.', M, y + 14);
+  }
+  doc.setFont(F, 'bold').setFontSize(9.5).setTextColor(20);
   doc.text('For ' + (c.name || ''), W - M, y, { align: 'right' });
-  doc.setFont('helvetica', 'normal').setFontSize(9).setTextColor(60);
+  doc.setFont(F, 'normal').setFontSize(9).setTextColor(60);
   doc.text('Authorised Signatory', W - M, y + 20, { align: 'right' });
 
   const n = doc.getNumberOfPages();
   for (let i = 1; i <= n; i++) {
-    doc.setPage(i); doc.setFont('helvetica', 'normal').setFontSize(7.5).setTextColor(110);
-    doc.text(`Invoice ${inv.number}  |  Page ${i} of ${n}`, W / 2, 291, { align: 'center' });
+    doc.setPage(i);
+    if (cfg.border === 'single') doc.setDrawColor(0).setLineWidth(0.4).rect(6, 6, 198, 285);
+    if (cfg.border === 'double') { doc.setDrawColor(...INK).setLineWidth(0.8).rect(5, 5, 200, 287); doc.setLineWidth(0.25).rect(6.8, 6.8, 196.4, 283.4); }
+    doc.setFont(F, 'normal').setFontSize(7.5).setTextColor(110);
+    doc.text(`${cfg.declaration ? 'This is a Computer Generated Invoice  |  ' : ''}Invoice ${inv.number}  |  Page ${i} of ${n}`, W / 2, 287.5, { align: 'center' });
   }
   return doc;
 }
@@ -300,7 +335,7 @@ function invoiceHTML(inv) {
   if (t.other) tot += tr('Other Charges', fmt(t.other));
   if (t.roundOff) tot += tr('Round Off', (t.roundOff > 0 ? '+ ' : '- ') + fmt(Math.abs(t.roundOff)));
   tot += tr('GRAND TOTAL', '₹ ' + fmt(t.grand), 'grand');
-  return `<div class="inv">
+  return `<div class="inv s-${esc(inv.style || 'classic')}">
     <div class="hd">${c.logo ? `<img src="${c.logo}" alt="">` : ''}<div><h2>${esc(c.name)}</h2><div class="pre">${esc(c.address)}</div>${st ? `<div>State: ${esc(st)}</div>` : ''}<div>${[c.gstin && 'GSTIN: ' + esc(c.gstin), c.pan && 'PAN: ' + esc(c.pan)].filter(Boolean).join(' &nbsp; ')}</div><div>${[c.mobile && 'Mobile: ' + esc(c.mobile), c.email && 'Email: ' + esc(c.email)].filter(Boolean).join(' &nbsp; ')}</div></div></div>
     <div class="ttl">${gstOn && c.gstin ? 'TAX INVOICE' : 'INVOICE'}</div>
     <table><tr><th>Bill To</th>${inv.shipOn ? '<th>Ship To</th>' : ''}<th>Invoice Details</th></tr><tr><td>${pt(inv.billTo)}</td>${inv.shipOn ? `<td>${pt(inv.shipTo || {})}</td>` : ''}<td>${meta}</td></tr></table>
@@ -535,7 +570,7 @@ async function newInvoice() {
   const cos = await DB.all('companies');
   const inv = {
     id: uid(), companyId: '', company: null, partyId: '', billTo: {}, shipOn: false, shipTo: {}, shipPartyId: '',
-    numberMode: 'auto', number: '', date: today(), vehicle: '', agent: '', delivery: '',
+    numberMode: 'auto', number: '', date: today(), style: S.invStyle || 'classic', vehicle: '', agent: '', delivery: '',
     payTerms: S.payTerms, terms: S.terms, items: [newItem()], gstApplicable: S.gstApplicable, gstMode: 'auto',
     other: '', discount: '', roundOff: true, createdAt: Date.now()
   };
@@ -564,6 +599,7 @@ async function pgForm() {
     <div class="fld"><span>Invoice number</span><div class="seg" id="modeSeg"><button type="button" data-m="auto" class="${c.numberMode === 'auto' ? 'on' : ''}">Automatic</button><button type="button" data-m="manual" class="${c.numberMode === 'manual' ? 'on' : ''}">Manual</button></div></div>
     <div class="grid2"><label class="fld"><span>Number</span><input id="numIn" data-k="number" value="${esc(c.number)}" ${c.numberMode === 'auto' ? 'readonly' : ''} autocomplete="off"></label>
     <label class="fld"><span>Date</span><input type="date" data-k="date" value="${esc(c.date)}"></label></div>
+    <label class="fld"><span>Invoice design</span><select data-k="style">${opts(Object.entries(STYLES).map(([k, v]) => [k, v.name]), c.style || 'classic')}</select></label>
     <details class="card" ${c.vehicle || c.agent || c.delivery || c.payTerms || c.terms ? 'open' : ''}><summary>More details (optional)</summary>
       <label class="fld"><span>Vehicle number</span><input data-k="vehicle" value="${esc(c.vehicle)}" autocapitalize="characters"></label>
       <label class="fld"><span>Agent / Broker name</span><input data-k="agent" value="${esc(c.agent)}"></label>
@@ -822,6 +858,7 @@ function invoiceActions(rec) {
 async function pgSettings() {
   setHeader('Settings', true);
   app.innerHTML = `<div class="stack">
+    <section class="card"><h3>Invoice design</h3><div class="stack" id="styleList">${Object.entries(STYLES).map(([k, v]) => `<label class="li"><span class="l"><b>${esc(v.name)}</b><span>${esc(v.desc)}</span></span><input type="radio" name="sStyle" value="${k}" ${(S.invStyle || 'classic') === k ? 'checked' : ''} style="width:24px;height:24px;min-height:0;flex-shrink:0"></label>`).join('')}</div><p class="note" style="margin:10px 0 0">New invoices start with this design. You can change it on each invoice before saving.</p></section>
     <section class="card"><h3>Invoice numbering</h3>
       <div class="grid2"><label class="fld"><span>Default prefix</span><input id="sPrefix" value="${esc(S.prefix)}"></label><label class="fld"><span>Digits</span><select id="sPad">${opts([1, 2, 3, 4, 5, 6].map(n => [n, n]), S.pad)}</select></label></div>
       <label class="fld"><span>First number for new companies</span><input id="sStart" value="${esc(S.startNo)}" inputmode="numeric"></label>
@@ -842,6 +879,7 @@ async function pgSettings() {
   ['sPrefix', 'sPad', 'sStart'].forEach(i => $('#' + i).addEventListener('input', ex)); ex();
   $('#sSave').onclick = async () => {
     const st = parseInt($('#sStart').value, 10); if (!(st >= 1)) return toast('First number must be 1 or more.');
+    S.invStyle = $('input[name=sStyle]:checked')?.value || 'classic';
     Object.assign(S, { prefix: $('#sPrefix').value, pad: +$('#sPad').value, startNo: st, dQty: +$('#sQ').value, dRate: +$('#sR').value, dAmt: +$('#sA').value, gstApplicable: $('#sGst').checked, gstRate: +$('#sRate').value, payTerms: $('#sPay').value, terms: $('#sTerms').value });
     await saveSettings(); toast('Settings saved.');
   };
